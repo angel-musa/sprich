@@ -1,5 +1,6 @@
 # src/score.py
 import numpy as np, librosa
+import sys
 
 def _mfcc(y, sr): 
     return librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)

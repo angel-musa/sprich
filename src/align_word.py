@@ -1,5 +1,6 @@
 # src/align_word.py
 from faster_whisper import WhisperModel
+import sys 
 
 _model = None
 def load_model(size="small"):
