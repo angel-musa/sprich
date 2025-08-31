@@ -8,3 +8,6 @@ soundfile
 phonemizer>=3.2
 numpy
 scipy
+scikit-learn>=1.4
+joblib>=1.3
+

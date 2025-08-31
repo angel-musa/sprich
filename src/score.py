@@ -2,25 +2,27 @@
 import numpy as np, librosa
 from jiwer import wer
 
+def _delta_safe(M):
+    """Delta with adaptive odd width strictly < T; zeros if too short."""
+    T = M.shape[1]
+    if T < 3:
+        return np.zeros_like(M)
+    # pick the largest odd width strictly less than T, capped at 9
+    w = min(9, T-1 if (T-1) % 2 == 1 else T-2)
+    if w < 3:
+        return np.zeros_like(M)
+    return librosa.feature.delta(M, width=w)
+
 def _logmel(y, sr):
+    # ensure at least ~0.2s so we get a few frames
+    min_len = int(0.2 * sr)
+    if len(y) < min_len:
+        y = np.pad(y, (0, min_len - len(y)))
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=40, n_fft=1024, hop_length=256)
     L = librosa.power_to_db(S + 1e-10)
-    # add deltas for more sensitivity
-    d1 = librosa.feature.delta(L)
-    d2 = librosa.feature.delta(L, order=2)
-    F = np.vstack([L, d1, d2])  # (120, T)
-    return F
-
-def _dtw_sim(F_ref, F_usr):
-    # cosine distance DTW on richer features
-    D, wp = librosa.sequence.dtw(F_ref, F_usr, metric="cosine")
-    if len(wp) == 0:
-        return 0.0
-    dist = float(D[-1, -1] / len(wp))
-    # Harsher mapping: sim = exp(-dist / k). smaller k → more penalty
-    k = 1.2
-    sim = np.exp(-dist / k)
-    return float(np.clip(sim, 0.0, 1.0))
+    d1 = _delta_safe(L)
+    d2 = _delta_safe(L)
+    return np.vstack([L, d1, d2])
 
 def extract_clip(y, sr, t0, t1):
     i0, i1 = int(max(0.0, t0)*sr), int(max(0.0, t1)*sr)
@@ -31,34 +33,42 @@ def extract_clip(y, sr, t0, t1):
 
 def _voicing_fraction(y, sr):
     f0, _, _ = librosa.pyin(y, fmin=75, fmax=350, sr=sr)
-    if f0 is None:
-        return 0.0
+    if f0 is None: return 0.0
     voiced = np.isfinite(f0)
     return float(voiced.mean()) if voiced.size else 0.0
 
 def pitch_slope(y, sr):
     f0, _, _ = librosa.pyin(y, fmin=75, fmax=350, sr=sr)
-    if f0 is None:
-        return 0.0
+    if f0 is None: return 0.0
     f0 = f0[~np.isnan(f0)]
-    if len(f0) < 5:
-        return 0.0
+    if len(f0) < 5: return 0.0
     return float(np.polyfit(np.arange(len(f0)), f0, 1)[0])
 
+def _dtw_sim(F_ref, F_usr):
+    D, wp = librosa.sequence.dtw(F_ref, F_usr, metric="cosine")
+    if len(wp) == 0: return 0.0
+    dist = float(D[-1, -1] / len(wp))
+    k = 1.2
+    return float(np.clip(np.exp(-dist / k), 0.0, 1.0))
+
 def _utterance_sim(y_ref, y_usr, sr):
-    Fr, Fu = _logmel(y_ref, sr), _logmel(y_usr, sr)
-    return _dtw_sim(Fr, Fu)
+    return _dtw_sim(_logmel(y_ref, sr), _logmel(y_usr, sr))
 
 def _duration_sim(d_ref, d_usr):
-    # tougher: any >30% deviation starts hurting a lot
-    if d_ref <= 0.01:
-        return 0.0
+    if d_ref <= 0.01: return 0.0
     rel = abs(d_ref - d_usr) / d_ref
     return float(np.clip(1.0 - (rel / 0.3), 0.0, 1.0))
 
+def fluency_score(y, sr):
+    rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=256)[0]
+    thr = max(0.02, float(np.median(rms) * 0.3))
+    voiced_frac = float((rms > thr).mean())
+    y_trim, _ = librosa.effects.trim(y, top_db=30)
+    trim_ratio = float(len(y_trim) / max(1, len(y)))
+    return float(np.clip(0.5*voiced_frac + 0.5*trim_ratio, 0.0, 1.0))
+
 def score_sentence(y_ref, y_usr, sr, ref_words, usr_words, text_words,
                    user_transcript=None, target_text=None):
-    # Word-level pairing
     n = min(len(ref_words), len(usr_words), len(text_words))
     per_word, seg_scores = [], []
 
@@ -71,8 +81,7 @@ def score_sentence(y_ref, y_usr, sr, ref_words, usr_words, text_words,
             if len(y_r) < sr*0.05 or len(y_u) < sr*0.05:
                 s = 0.0
             else:
-                Fr, Fu = _logmel(y_r, sr), _logmel(y_u, sr)
-                s = _dtw_sim(Fr, Fu)
+                s = _dtw_sim(_logmel(y_r, sr), _logmel(y_u, sr))
 
             dur_sim = _duration_sim(rw["end"]-rw["start"], uw["end"]-uw["start"])
             word_score = float(np.clip(0.7*s + 0.3*dur_sim, 0.0, 1.0))
@@ -80,36 +89,33 @@ def score_sentence(y_ref, y_usr, sr, ref_words, usr_words, text_words,
             seg_scores.append(word_score)
 
     if len(seg_scores) == 0:
-        # Fallback to utterance-level
         s_all = _utterance_sim(y_ref, y_usr, sr)
-        per_word = [{"word": (w if text_words else "Gesamte Äußerung"), "score": s_all} for w in (text_words or ["Gesamte Äußerung"])]
+        per_word = [{"word": (w if text_words else "Gesamte Äußerung"), "score": s_all}
+                    for w in (text_words or ["Gesamte Äußerung"])]
         seg_mean = s_all
     else:
         seg_mean = float(np.mean(seg_scores))
 
-    # Prosody with voicing guard
     ps_ref = pitch_slope(y_ref, sr); ps_usr = pitch_slope(y_usr, sr)
     voicing = _voicing_fraction(y_usr, sr)
     prosody_raw = 1.0 - min(1.0, abs(ps_ref - ps_usr)/50.0)
-    prosody = float(prosody_raw * np.clip((voicing - 0.2)/0.6, 0.0, 1.0))  # if <20% voiced, crush prosody
+    prosody = float(prosody_raw * np.clip((voicing - 0.2)/0.6, 0.0, 1.0))
 
-    # Fluency (rough): RMS + pause logic could go here; keep simple
-    rms = librosa.feature.rms(y=y_usr).mean()
-    fluency = 1.0 if (rms and rms > 0) else 0.6
+    fluency = fluency_score(y_usr, sr)
 
-    # Text accuracy penalty (WER)
     text_scale = 1.0
     if user_transcript and target_text:
-        # normalize punctuation/case
         hyp = user_transcript.strip().lower()
         ref = target_text.strip().lower()
-        w = wer(ref, hyp)  # 0.0 (perfect) .. 1.0+
-        w = float(min(1.0, w))
-        # If you didn't say the right words, we scale down the total (up to 40% hit)
+        w = float(min(1.0, wer(ref, hyp)))
         text_scale = float(1.0 - 0.4*w)
 
-    # Aggregate
     base = (0.72*seg_mean + 0.18*prosody + 0.10*fluency)
     overall = float(np.clip(100.0 * base * text_scale, 0.0, 100.0))
 
-    return overall, per_word, {"prosody": float(prosody), "fluency": float(fluency), "voicing": voicing, "text_scale": text_scale}
+    return overall, per_word, {
+        "prosody": float(prosody),
+        "fluency": float(fluency),
+        "voicing": float(voicing),
+        "text_scale": float(text_scale),
+    }
