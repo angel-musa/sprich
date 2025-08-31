@@ -10,15 +10,60 @@ import librosa
 import streamlit as st
 
 # Local modules
-from src.align_word import transcribe_with_words
 from src.score import score_sentence
 from src.tips import tips_for
+import soundfile as sf
 
+from src.align_word import transcribe_with_words, transcribe_text
 
-# ---------------------------
-# Page config & helpers
-# ---------------------------
-st.set_page_config(page_title="Sprich! – German Pronunciation Coach", page_icon="🇩🇪", layout="centered")
+# --- Page config MUST be the first Streamlit call ---
+st.set_page_config(page_title="Sprich!", page_icon="🇩🇪", layout="centered")
+
+# --- Theme values from config.toml (optional) ---
+THEME_PRIMARY = st.get_option("theme.primaryColor") or "#58CC02"
+THEME_BG = st.get_option("theme.backgroundColor") or "#FFFFFF"
+THEME_BG2 = st.get_option("theme.secondaryBackgroundColor") or "#F2FAEB"
+THEME_TEXT = st.get_option("theme.textColor") or "#1C1E21"
+
+# --- Global CSS (use data-testid selectors, not random emotion classes) ---
+st.markdown(f"""
+<style>
+/* App container background (gradient) */
+[data-testid="stAppViewContainer"] {{
+  background: radial-gradient(1200px 600px at 20% 0%, {THEME_BG2} 0%, {THEME_BG} 40%, {THEME_BG} 100%);
+}}
+/* Make the top header transparent so the gradient shows through */
+[data-testid="stHeader"] {{ background: rgba(0,0,0,0); }}
+/* Page width + nicer metrics */
+.block-container {{ max-width: 900px; }}
+[data-testid="stMetricValue"] {{ font-weight: 700; }}
+/* Primary buttons a touch bolder */
+.stButton > button {{
+  border-radius: 12px;
+  padding: 0.6rem 1.1rem;
+  font-weight: 600;
+}}
+/* Chips */
+.chip {{
+  color: white;
+  padding: 6px 12px;
+  margin: 4px;
+  border-radius: 999px;
+  display: inline-block;
+  font-weight: 600;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# Custom background gradient
+st.markdown("""
+<style>
+body {
+  background: radial-gradient(1200px 600px at 20% 0%, #F2FAEB 0%, #FFFFFF 40%, #FFFFFF 100%);
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 DATA_DIR = Path("data")
 REF_DIR = DATA_DIR / "ref_audio"
@@ -66,30 +111,34 @@ def load_audio_from_blob_or_file(audio_blob, file_fallback, sr=SR):
         # For transcribe_with_words we can pass the same file-like object or write temp
         # faster-whisper accepts file paths; create a temp copy to be safe
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            librosa.output.write_wav(tmp.name, y, sr)  # deprecated in newer librosa; okay for MVP
+            sf.write(tmp.name, y, SR)
             tmp_path = tmp.name
+
         return y, sr, tmp_path
     else:
         return None, None, None
 
 def render_word_chips(per_word):
-    st.write("Per-word feedback (darker = better):")
-    # Build a line of colored chips using simple inline HTML
+    st.write("Per-word feedback (greener = better):")
     spans = []
+    from matplotlib.colors import to_rgb  # comes with matplotlib; if not installed, hardcode colors
+    def hex_to_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i+2], 16) for i in (0,2,4))
+
+    pr = hex_to_rgb(THEME_PRIMARY)  # target color
+    red = (220, 38, 38)            # start color
+
     for w in per_word:
-        # w['score'] is 0..1 — map to color (greenish for high, red for low)
-        # We'll interpolate between red (low) and green (high) via simple channel math.
-        s = float(w["score"])
-        r = int(255 * (1 - s))
-        g = int(60 + 170 * s)
-        b = int(60)
+        s = float(w["score"])  # 0..1
+        r = int(red[0] + (pr[0]-red[0]) * s)
+        g = int(red[1] + (pr[1]-red[1]) * s)
+        b = int(red[2] + (pr[2]-red[2]) * s)
         spans.append(
-            f"<span style='background-color: rgb({r},{g},{b}); color: white; "
-            f"padding: 4px 10px; margin: 4px; border-radius: 10px; display:inline-block;'>"
+            f"<span class='chip' style='background-color: rgb({r},{g},{b});'>"
             f"{w['word']} ({int(100*s)}%)</span>"
         )
     st.markdown(" ".join(spans), unsafe_allow_html=True)
-
 
 # ---------------------------
 # UI
@@ -146,27 +195,17 @@ if st.button("Score my pronunciation", type="primary"):
         try:
             ref_words = transcribe_with_words(ref_path, language="de")
             usr_words = transcribe_with_words(usr_tmp_path, language="de")
-        except Exception as e:
-            st.error(f"Whisper transcription failed: {e}")
-            st.stop()
+            user_text = transcribe_text(usr_tmp_path, language="de")
+            target_text = text
 
-    # Tokenize text (roughly) to pair with word spans
-    text_words = (
-        text.replace("!", "")
-            .replace("?", "")
-            .replace(".", "")
-            .replace(",", "")
-            .split()
-    )
-
-    # Score
-    with st.status("Scoring pronunciation...", expanded=False):
-        try:
             score, per_word, meta = score_sentence(
-                y_ref, y_usr, SR, ref_words, usr_words, text_words
+                y_ref, y_usr, SR, ref_words, usr_words, 
+                target_text.replace("!", "").replace("?", "").replace(".", "").replace(",", "").split(),
+                user_transcript=user_text,
+                target_text=target_text
             )
         except Exception as e:
-            st.error(f"Scoring failed: {e}")
+            st.error(f"Whisper transcription failed: {e}")
             st.stop()
 
     # Results

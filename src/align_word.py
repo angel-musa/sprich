@@ -1,6 +1,5 @@
 # src/align_word.py
 from faster_whisper import WhisperModel
-import sys 
 
 _model = None
 def load_model(size="small"):
@@ -13,7 +12,23 @@ def transcribe_with_words(path, language="de"):
     model = load_model()
     segments, info = model.transcribe(path, language=language, word_timestamps=True, vad_filter=True)
     words = []
-    for seg in segments:
-        for w in seg.words or []:
-            words.append({"text": w.word, "start": float(w.start), "end": float(w.end)})
+    seg_list = list(segments)
+    for seg in seg_list:
+        if seg.words:
+            for w in seg.words:
+                if w.start is not None and w.end is not None:
+                    words.append({"text": (w.word or "").strip(), "start": float(w.start), "end": float(w.end)})
+
+    if not words and seg_list:
+        start = min(s.start for s in seg_list if s.start is not None)
+        end   = max(s.end   for s in seg_list if s.end   is not None)
+        if start is not None and end is not None and end > start:
+            words = [{"text": "UTTERANCE", "start": float(start), "end": float(end)}]
     return words
+
+def transcribe_text(path, language="de"):
+    """Return a plain transcript string (no timestamps) for WER penalty."""
+    model = load_model()
+    segments, info = model.transcribe(path, language=language, vad_filter=True)
+    segs = list(segments)
+    return " ".join(s.text.strip() for s in segs if s.text)
