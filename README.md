@@ -4,8 +4,8 @@ Sprich! (German for *Speak!*) is an interactive web app that helps learners **pr
 It combines **speech recognition**, **acoustic similarity scoring**, and a custom **phoneme classifier** for the tricky *ich-Laut* (/ç/) vs *ach-Laut* (/x/).
 
 Built with **Python + Streamlit + ML**.
-
 Check it out here: https://sprich.streamlit.app/
+
 ---
 
 ## ✨ Features
