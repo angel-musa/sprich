@@ -5,6 +5,7 @@ It combines **speech recognition**, **acoustic similarity scoring**, and a custo
 
 Built with **Python + Streamlit + ML**.
 
+Check it out here: https://sprich.streamlit.app/
 ---
 
 ## ✨ Features
